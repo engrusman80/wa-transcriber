@@ -5,6 +5,9 @@ import { GoogleGenAI } from "@google/genai";
 import multer from "multer";
 import os from "os";
 import fs from "fs";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 async function startServer() {
   const app = express();
@@ -18,10 +21,10 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Dynamic initializer for the GoogleGenAI instance supporting real-time key modifications
-  function getGeminiClient(): GoogleGenAI {
+  function getGeminiClient(): GoogleGenAI | null {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is missing. Please add it to your secrets in Settings > Secrets.");
+      return null; // Optional: demo mode will be used
     }
     return new GoogleGenAI({
       apiKey,
@@ -54,18 +57,17 @@ async function startServer() {
         return res.status(400).json({ error: "No audio file uploaded or base64 data provided." });
       }
 
-      // Retrieve Gemini SDK client
-      try {
-        client = getGeminiClient();
-      } catch (err: any) {
-        console.warn("Gemini Client initialization failed, serving simulated demo response:", err.message);
+      // Retrieve Gemini SDK client (optional; demo mode used if absent)
+      client = getGeminiClient();
+      if (!client) {
+        console.log("Gemini API key not configured, serving free demo mode");
         return res.status(200).json({
           isDemo: true,
-          transcript: `[DEMO MODE] Suna hai aapne voice recording upload ki hai! (Please configure your key in Settings > Secrets to enable live AI transcription and translation of this actual audio file.)`,
-          translation: "I heard that you uploaded a voice recording! Please configure your API key to activate live translations.",
+          transcript: `[FREE MODE] Suna hai aapne voice recording upload ki hai! Ye demo response hai. Live transcription activate karne ke liye apna Gemini API key add karo.`,
+          translation: "I heard that you uploaded a voice recording! This is a demo response. Add your Gemini API key to enable live transcription and translation.",
           detectedLanguage: "Urdu/Hindi (Romanized)",
-          summary: "Voice note received under demo parameters pending system key configuration.",
-          sentiment: "Warm Advice",
+          summary: "Voice note received in free demo mode.",
+          sentiment: "Informative",
           success: true,
         });
       }
