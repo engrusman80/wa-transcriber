@@ -6,9 +6,143 @@ import {
 } from "lucide-react";
 import { TranscriptionResult } from "../types";
 
+// Helper functions for WAV encoding and audio compression
+async function compressAudioToWav(
+  file: File, 
+  onStatusChange: (status: string) => void
+): Promise<{ compressedFile: File; originalSize: number; compressedSize: number }> {
+  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioContextClass) {
+    throw new Error("Web Audio API is not supported in this browser.");
+  }
+
+  onStatusChange("Reading audio file...");
+  const arrayBuffer = await file.arrayBuffer();
+  
+  onStatusChange("Analyzing sound channels...");
+  const audioCtx = new AudioContextClass();
+  let audioBuffer: AudioBuffer;
+  try {
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  } catch (err) {
+    console.error("Audio decoding failed:", err);
+    throw new Error("Could not decode audio. Try using stable MP3, WAV or M4A formats.");
+  } finally {
+    await audioCtx.close();
+  }
+
+  const duration = audioBuffer.duration;
+  
+  // Target around 2.2 MB max to stay 100% safe from Vercel's 4.5 MB serverless limit
+  const maxBytesTarget = 2.2 * 1024 * 1024;
+  
+  // Decide whether to use 8-bit resolution (unsigned) or 16-bit resolution (signed)
+  // For any file longer than 90 seconds, use 8-bit PCM to reduce structural size in half instantly!
+  const use8Bit = duration > 90 || (duration * 16000 * 2) > maxBytesTarget;
+  const bytesPerSample = use8Bit ? 1 : 2;
+  
+  // Solve for target sample rate: duration * targetSampleRate * bytesPerSample <= maxBytesTarget
+  let targetSampleRate = Math.floor(maxBytesTarget / (duration * bytesPerSample));
+  
+  // Constrain sample rate between 8000 Hz (quality minimum) and 16000 Hz (speech maximum)
+  targetSampleRate = Math.max(8000, Math.min(16000, targetSampleRate));
+  onStatusChange(`Optimizing voice tracks (${targetSampleRate}Hz Mono, ${use8Bit ? "8-Bit" : "16-Bit"})...`);
+
+  const numberOfChannels = 1; // force mono to save 50% space instantly!
+  const offlineCtx = new OfflineAudioContext(
+    numberOfChannels, 
+    Math.floor(targetSampleRate * duration), 
+    targetSampleRate
+  );
+  
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(offlineCtx.destination);
+  source.start();
+  
+  onStatusChange("Compressing audio footprint...");
+  const renderedBuffer = await offlineCtx.startRendering();
+  const channelData = renderedBuffer.getChannelData(0);
+  
+  onStatusChange("Generating lightweight WAV wrap...");
+  const wavBuffer = encodeWAV(channelData, targetSampleRate, use8Bit);
+  const blob = new Blob([wavBuffer], { type: "audio/wav" });
+  
+  const originalSize = file.size;
+  const compressedSize = blob.size;
+  
+  const compressedFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + "_optimized.wav", {
+    type: "audio/wav"
+  });
+
+  return {
+    compressedFile,
+    originalSize,
+    compressedSize
+  };
+}
+
+function encodeWAV(samples: Float32Array, sampleRate: number, use8Bit: boolean): ArrayBuffer {
+  const bytesPerSample = use8Bit ? 1 : 2;
+  const blockAlign = bytesPerSample; // 1 channel * bytesPerSample
+  const bitsPerSample = use8Bit ? 8 : 16;
+
+  const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+  const view = new DataView(buffer);
+  
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // Raw PCM format
+  view.setUint16(22, 1, true); // 1 Channel (Mono)
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true); // Byte rate
+  view.setUint16(32, blockAlign, true); // Block align
+  view.setUint16(34, bitsPerSample, true); // Bits per sample
+  writeString(view, 36, 'data');
+  view.setUint32(40, samples.length * bytesPerSample, true);
+  
+  if (use8Bit) {
+    floatTo8BitPCM(view, 44, samples);
+  } else {
+    floatTo16BitPCM(view, 44, samples);
+  }
+  
+  return buffer;
+}
+
+function floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
+  for (let i = 0; i < input.length; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, input[i]));
+    output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+}
+
+function floatTo8BitPCM(output: DataView, offset: number, input: Float32Array) {
+  for (let i = 0; i < input.length; i++, offset++) {
+    let s = Math.max(-1, Math.min(1, input[i]));
+    // Unsigned 8-bit PCM (silence is 128)
+    const val = Math.floor((s + 1) * 127.5);
+    output.setUint8(offset, Math.max(0, Math.min(255, val)));
+  }
+}
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
 export default function AudioLab() {
   // File upload state managers (Direct binary storage - no Base64 convert)
   const [droppedFile, setDroppedFile] = useState<File | null>(null);
+  const [compressing, setCompressing] = useState<boolean>(false);
+  const [compressStep, setCompressStep] = useState<string>("");
+  const [originalFile, setOriginalFile] = useState<File | null>(null);
+  const [compressionRatio, setCompressionRatio] = useState<number | null>(null);
+  const [originalSizeState, setOriginalSizeState] = useState<number | null>(null);
 
   // Collapsible Settings zone
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -30,12 +164,39 @@ export default function AudioLab() {
     }
   };
 
-  const processSelectedFile = (file: File) => {
+  const processSelectedFile = async (file: File) => {
     setResult(null);
     setErrorText(null);
+    setOriginalFile(file);
+    setOriginalSizeState(file.size);
+    setCompressionRatio(null);
     
-    // Safely store File reference as object
-    setDroppedFile(file);
+    // If file size exceeds 3.0 MB, run high-performance in-browser compression to ensure it stays well under Vercel's strict 4.5 MB function payload limit
+    if (file.size > 3.0 * 1024 * 1024) {
+      setCompressing(true);
+      setCompressStep("Initializing audio engine...");
+      try {
+        const { compressedFile, originalSize, compressedSize } = await compressAudioToWav(file, (msg) => {
+          setCompressStep(msg);
+        });
+        
+        setDroppedFile(compressedFile);
+        const ratio = Math.round((1 - compressedSize / originalSize) * 100);
+        setCompressionRatio(ratio > 0 ? ratio : 0);
+      } catch (err: any) {
+        console.warn("Client-side audio optimizer warning:", err);
+        // Fallback to original file if decoding or offline rendering is unsupported/fails
+        setDroppedFile(file);
+        setErrorText(
+          `In-browser optimizer warning: ${err.message || 'Decoding failed'}. ` +
+          "Falling back to original file payload. If this fails during upload, please record/compress your file as low-bitrate Mono MP3/M4A below 4 MB!"
+        );
+      } finally {
+        setCompressing(false);
+      }
+    } else {
+      setDroppedFile(file);
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -52,6 +213,9 @@ export default function AudioLab() {
 
   const handleClearFile = () => {
     setDroppedFile(null);
+    setOriginalFile(null);
+    setOriginalSizeState(null);
+    setCompressionRatio(null);
     setResult(null);
     setErrorText(null);
   };
@@ -278,7 +442,16 @@ export default function AudioLab() {
               Select Voice File
             </h4>
 
-            {droppedFile ? (
+            {compressing ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-emerald-50/10 border-2 border-dashed border-emerald-300 rounded-xl min-h-[220px] animate-pulse">
+                <RefreshCw className="w-10 h-10 text-emerald-600 animate-spin mb-3" />
+                <p className="text-xs font-bold text-slate-800">⚡ Sound Engine Optimizing Audio...</p>
+                <p className="text-[11px] text-emerald-600 font-medium mt-1 font-mono">{compressStep}</p>
+                <p className="text-[10px] text-slate-400 mt-3 max-w-xs leading-normal">
+                  Resampling larger recording into dynamic Mono format to safely stay under Vercel's strict payloads.
+                </p>
+              </div>
+            ) : droppedFile ? (
               <div className="flex-1 flex flex-col items-center justify-center text-center p-3">
                 <div className="bg-emerald-50 text-emerald-800 p-6 rounded-xl border border-emerald-100 w-full max-w-sm">
                   <FileText className="w-10 h-10 text-emerald-700 mx-auto mb-2" />
@@ -287,6 +460,14 @@ export default function AudioLab() {
                     {humanReadableSize(droppedFile.size)} • {droppedFile.type || "Audio format"}
                   </p>
                   
+                  {originalSizeState && compressionRatio !== null && compressionRatio > 0 && (
+                    <div className="mt-3 bg-emerald-100/60 p-2.5 rounded-lg text-[10px] text-emerald-900 leading-relaxed border border-emerald-200/50">
+                      <span className="font-bold text-emerald-800">⚡ Size Optimizer:</span> Shrinked file by{" "}
+                      <span className="font-extrabold text-emerald-700 font-mono">{compressionRatio}%</span>{" "}
+                      (from {humanReadableSize(originalSizeState)} to {humanReadableSize(droppedFile.size)}) to seamlessly bypass Vercel limits!
+                    </div>
+                  )}
+
                   <button
                     onClick={handleClearFile}
                     className="mt-4 text-rose-600 hover:text-rose-700 text-xs font-semibold flex items-center gap-1 mx-auto cursor-pointer"
