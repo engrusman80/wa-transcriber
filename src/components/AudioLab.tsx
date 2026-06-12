@@ -71,15 +71,8 @@ export default function AudioLab() {
       }
 
       // Setup clean streaming steps based on sizing
-      const isHeavy = droppedFile.size > 25 * 1024 * 1024;
-      setLoadingStep(isHeavy ? "Uploading heavy file binary to cloud structures..." : "Sending audio stream to transcription engine...");
-
-      // Construct browser Multipart FormData to avoid V8 Memory Limit crash triggered by heavy Base64 conversion
-      const formData = new FormData();
-      formData.append("audioFile", droppedFile, droppedFile.name);
-      formData.append("language", selectedLanguage);
-      formData.append("action", selectedAction);
-      formData.append("targetLanguage", targetTranslateLanguage);
+      const isHeavy = droppedFile.size > 4.2 * 1024 * 1024;
+      setLoadingStep(isHeavy ? "Uploading large file payload..." : "Initiating voice compilation...");
 
       // Progressive placeholder steps for 5-hour files
       const steps = [
@@ -98,20 +91,65 @@ export default function AudioLab() {
         }
       }, 5000);
 
-      // Perform direct multi-part fetch
-      const response = await fetch("/api/transcribe", {
-        method: "POST",
-        body: formData // Content-Type header left blank purposely for native boundary generation
-      });
+      let response: Response;
+
+      if (!isHeavy) {
+        setLoadingStep("Converting voice file to transfer format...");
+        
+        const toBase64 = (file: File): Promise<string> =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = (error) => reject(error);
+          });
+          
+        const base64Data = await toBase64(droppedFile);
+        
+        setLoadingStep("Sending secure audio payload to transcription engine...");
+        response = await fetch("/api/transcribe", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            audioData: base64Data,
+            mimeType: droppedFile.type || "audio/webm",
+            language: selectedLanguage,
+            action: selectedAction,
+            targetLanguage: targetTranslateLanguage,
+            fileName: droppedFile.name,
+          }),
+        });
+      } else {
+        // Fallback to standard Multipart FormData for heavy files
+        setLoadingStep("Uploading heavy file to cloud structure...");
+        const formData = new FormData();
+        formData.append("audioFile", droppedFile, droppedFile.name);
+        formData.append("language", selectedLanguage);
+        formData.append("action", selectedAction);
+        formData.append("targetLanguage", targetTranslateLanguage);
+        
+        response = await fetch("/api/transcribe", {
+          method: "POST",
+          body: formData,
+        });
+      }
 
       clearInterval(stepInterval);
 
-      if (!response.ok) {
-        const errorJson = await response.json();
-        throw new Error(errorJson.error || "Failed to process audio transcription.");
+      const responseText = await response.text();
+      let parsedResult: any;
+      try {
+        parsedResult = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Server Response Error: ${responseText.slice(0, 200)}...`);
       }
 
-      const parsedResult: TranscriptionResult = await response.json();
+      if (!response.ok) {
+        throw new Error(parsedResult.error || "Failed to process audio transcription.");
+      }
+
       setResult(parsedResult);
     } catch (err: any) {
       console.error("Transcribe API Error:", err);
@@ -260,6 +298,15 @@ export default function AudioLab() {
               </div>
             )}
           </div>
+
+          {droppedFile && droppedFile.size > 4.2 * 1024 * 1024 && (
+            <div className="bg-amber-50/70 p-3 rounded-xl border border-amber-200/60 text-[11px] text-amber-800 leading-relaxed flex items-start gap-2 shadow-2xs">
+              <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">Platform Payload Alert:</span> This file is {humanReadableSize(droppedFile.size)}. Some cloud setups (like your Vercel deployment) enforce a strict 4.5 MB body limit. For long files (up to 1 hour), simply compress/recommend your client to record files as a compressed low-bitrate MP3/MPEG (e.g. 8kbps to 16kbps mono) which easily fits 1 full hour of voice notes into less than 3.5 MB!
+              </div>
+            </div>
+          )}
 
           {/* Core Trigger conversion submit button */}
           <button

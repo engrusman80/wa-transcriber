@@ -44,8 +44,29 @@ async function startServer() {
     let client: GoogleGenAI | null = null;
 
     try {
-      const { language, action, targetLanguage, audioData, mimeType } = req.body || {};
+      const { language, action, targetLanguage, audioData, mimeType, fileName } = req.body || {};
       
+      // Convert base64 data to a temporary file structure if provided, mimicking standard multipart file upload
+      if (audioData && !req.file) {
+        try {
+          const cleanBase64 = audioData.includes(";base64,") ? audioData.split(";base64,")[1] : audioData;
+          const buffer = Buffer.from(cleanBase64, "base64");
+          const tempFilePath = path.join(os.tmpdir(), `upload_${Date.now()}_temp`);
+          fs.writeFileSync(tempFilePath, buffer);
+          
+          req.file = {
+            path: tempFilePath,
+            size: buffer.length,
+            originalname: fileName || "audio.webm",
+            mimetype: mimeType || "audio/webm",
+          } as any;
+          console.log(`Bypassed upload stream constraints: decoded base64 successfully into a temp local file of ${buffer.length} bytes.`);
+        } catch (convErr: any) {
+          console.error("Failed to parse base64 audio data input:", convErr);
+          return res.status(400).json({ error: `Invalid audio data input stream: ${convErr.message}` });
+        }
+      }
+
       // Determine if we have an uploaded file or base64 JSON payload
       const hasUploadedFile = !!req.file;
       const hasBase64Data = !!audioData;
@@ -199,7 +220,13 @@ async function startServer() {
       }
 
       // Send cleanly parsed results back to client
-      const resultObj = JSON.parse(resultText);
+      let cleanText = resultText.trim();
+      const firstBrace = cleanText.indexOf("{");
+      const lastBrace = cleanText.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        cleanText = cleanText.substring(firstBrace, lastBrace + 1);
+      }
+      const resultObj = JSON.parse(cleanText);
       return res.status(200).json({
         ...resultObj,
         isDemo: false,
