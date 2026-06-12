@@ -263,11 +263,51 @@ async function startServer() {
 
       // Send cleanly parsed results back to client
       let cleanText = resultText.trim();
-      const firstBrace = cleanText.indexOf("{");
-      const lastBrace = cleanText.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        cleanText = cleanText.substring(firstBrace, lastBrace + 1);
-      }
+      
+      // Robustly extract only the first complete JSON object to handle potential trailing tokens or text
+      const extractFirstJSON = (text: string): string => {
+        const firstBrace = text.indexOf("{");
+        if (firstBrace === -1) return text;
+        
+        let braceCount = 0;
+        let inString = false;
+        let escaping = false;
+        
+        for (let i = firstBrace; i < text.length; i++) {
+          const char = text[i];
+          if (escaping) {
+            escaping = false;
+            continue;
+          }
+          if (char === "\\") {
+            escaping = true;
+            continue;
+          }
+          if (char === '"') {
+            inString = !inString;
+            continue;
+          }
+          if (!inString) {
+            if (char === "{") {
+              braceCount++;
+            } else if (char === "}") {
+              braceCount--;
+              if (braceCount === 0) {
+                return text.substring(firstBrace, i + 1);
+              }
+            }
+          }
+        }
+        
+        // Fallback to substring matching if braces are unbalanced
+        const lastBrace = text.lastIndexOf("}");
+        if (lastBrace > firstBrace) {
+          return text.substring(firstBrace, lastBrace + 1);
+        }
+        return text;
+      };
+
+      cleanText = extractFirstJSON(cleanText);
       const resultObj = JSON.parse(cleanText);
       return res.status(200).json({
         ...resultObj,
