@@ -1,33 +1,21 @@
-import { IncomingMessage } from "http";
+import express from "express";
 import { GoogleGenAI } from "@google/genai";
-import formidable from "formidable";
-import fs from "fs";
+import multer from "multer";
 import os from "os";
+import fs from "fs";
+import path from "path";
 
-const parseForm = (req: IncomingMessage) => {
-  return new Promise<{ fields: formidable.Fields; files: formidable.Files }>((resolve, reject) => {
-    const form = formidable({
-      uploadDir: os.tmpdir(),
-      keepExtensions: true,
-      maxFileSize: 10 * 1024 * 1024 * 1024, // 10 GB
-      allowEmptyFiles: false,
-      multiples: false,
-    });
+const app = express();
+const upload = multer({ dest: os.tmpdir() });
 
-    form.parse(req, (err, fields, files) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve({ fields, files });
-      }
-    });
-  });
-};
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
-function createGeminiClient() {
+// Dynamic initializer for the GoogleGenAI instance supporting real-time key modifications
+function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is missing. Please add it to your Vercel Environment Variables.");
+    throw new Error("GEMINI_API_KEY is missing. Please add it to your secrets in Settings > Secrets.");
   }
   return new GoogleGenAI({
     apiKey,
@@ -39,75 +27,158 @@ function createGeminiClient() {
   });
 }
 
-function sendJson(res: any, statusCode: number, payload: any) {
-  res.statusCode = statusCode;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(payload));
-}
+const handleTranscribe = async (req: express.Request, res: express.Response) => {
+  // Disable HTTP request & response timeouts to accommodate 5-hour long voice files
+  req.setTimeout(0);
+  res.setTimeout(0);
 
-export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") {
-    return sendJson(res, 405, { error: "Method not allowed" });
-  }
+  let mediaFileRef: any = null;
+  let useFilesApi = false;
+  let client: GoogleGenAI | null = null;
 
-  let tempFilePath: string | undefined;
   try {
-    const { fields, files } = await parseForm(req);
-    const { language, action, targetLanguage } = fields || {};
+    const { language, action, targetLanguage, audioData, mimeType } = req.body || {};
+    
+    // Determine if we have an uploaded file or base64 JSON payload
+    const hasUploadedFile = !!req.file;
+    const hasBase64Data = !!audioData;
 
-    const uploadedFile = files?.audioFile as formidable.File | undefined;
-    const tempFilePath = uploadedFile?.filepath;
-    const hasUploadedFile = !!uploadedFile && uploadedFile.size > 0;
-
-    if (!hasUploadedFile) {
-      return sendJson(res, 400, { error: "No audio file uploaded." });
+    if (!hasUploadedFile && !hasBase64Data) {
+      return res.status(400).json({ error: "No audio file uploaded or base64 data provided." });
     }
 
-    let client;
+    // Retrieve Gemini SDK client
     try {
-      client = createGeminiClient();
-    } catch (error: any) {
-      return sendJson(res, 200, {
+      client = getGeminiClient();
+    } catch (err: any) {
+      console.warn("Gemini Client initialization failed, serving simulated demo response:", err.message);
+      return res.status(200).json({
         isDemo: true,
-        transcript: "[DEMO MODE] Audio upload received. Configure GEMINI_API_KEY in Vercel Environment Variables to enable live transcription.",
-        translation: "Please set your Gemini API key to enable live transcription and translation.",
-        detectedLanguage: "Unknown",
-        summary: "Demo response served because the Gemini API key is not configured.",
-        sentiment: "Neutral",
+        transcript: `[DEMO MODE] Suna hai aapne voice recording upload ki hai! (Please configure your key in Settings > Secrets to enable live AI transcription and translation of this actual audio file.)`,
+        translation: "I heard that you uploaded a voice recording! Please configure your API key to activate live translations.",
+        detectedLanguage: "Urdu/Hindi (Romanized)",
+        summary: "Voice note received under demo parameters pending system key configuration.",
+        sentiment: "Warm Advice",
         success: true,
       });
     }
 
-    const systemPrompt = [
-      "You are an advanced voice transcription assistant.",
-      "1. Transcribe the attached audio file with accurate punctuation, capitalization, and speaker clarity.",
-      "2. Detect the spoken language.",
-      action === "translate" && targetLanguage
-        ? `3. Provide a natural and highly accurate translation of the transcript into ${targetLanguage}.`
-        : "3. Provide a natural English translation if the message is in a non-English language.",
-      "4. If the source language is Urdu or Hindi, provide a phonetic Roman Urdu translation in the 'romanUrduTranslation' field.",
-      "5. Provide a 1-sentence quick summary of the main points in the voice note.",
-      "6. Detect the speaker sentiment.",
-      "Return the result as a strictly valid JSON object with fields: transcript, detectedLanguage, translation, romanUrduTranslation, summary, sentiment.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    // Assemble system-level prompt guidelines
+    let promptText = "You are an advanced voice transcription assistant.\n";
+    promptText += "1. Transcribe the attached audio file with accurate punctuation, capitalization, and speaker clarity.\n";
+    promptText += `2. Detect the spoken language. Let us know what language was detected.\n`;
+    
+    if (action === "translate" && targetLanguage) {
+      promptText += `3. Provide a natural and highly accurate translation of the transcript into ${targetLanguage}.\n`;
+      if (targetLanguage.toLowerCase().includes("roman") || targetLanguage.toLowerCase().includes("urdu")) {
+        promptText += "NOTE: For Roman Urdu, write the Urdu language phonetically using English/Latin alphabets (similar to text messaging style like 'Aap kaise hain? Subha ki meeting final ho gayi hai').\n";
+      }
+    } else {
+      promptText += "3. Provide a natural English translation if the message is in Urdu, Spanish, Hindi, or any other non-English language.\n";
+    }
 
-    const mediaFileRef = await client.files.upload({
-      file: uploadedFile.filepath,
-      config: {
-        mimeType: uploadedFile.mimetype || "audio/webm",
-      },
-    });
+    promptText += "4. If the source language is Urdu (Script) or Hindi, provide a phonetic Roman Urdu translation in the 'romanUrduTranslation' field (e.g. written in Latin script like 'Salam! Main thik hoon'). Otherwise, translate the content into Roman Urdu in that field.\n";
+    promptText += "5. Provide a 1-sentence quick summary of the main points in the voice note.\n";
+    promptText += "6. Detect the speaker sentiment (e.g., Happy, Calm, Hurried, Anxious, Angry).\n";
+    promptText += "Please return the output as a valid JSON object matching the following fields exactly so we can display it cleanly in our UI:\n";
+    promptText += "{\n";
+    promptText += "  \"transcript\": \"...\",\n";
+    promptText += "  \"detectedLanguage\": \"...\",\n";
+    promptText += "  \"translation\": \"...\",\n";
+    promptText += "  \"romanUrduTranslation\": \"...\",\n";
+    promptText += "  \"summary\": \"...\",\n";
+    promptText += "  \"sentiment\": \"...\"\n";
+    promptText += "}";
 
+    let contentParts: any[] = [];
+
+    if (hasUploadedFile && req.file) {
+      // Handle large files seamlessly using Gemini's native Files API
+      useFilesApi = true;
+      console.log(`Uploading heavy audio stream to Gemini Files API (${req.file.size} bytes)...`);
+      
+      // Resolve target mimeType accurately, ensuring MPEG codec mapping matches
+      const originalName = req.file.originalname || "";
+      const extension = path.extname(originalName).toLowerCase();
+      let resolvedMimeType = req.file.mimetype || "audio/webm";
+
+      if (
+        !resolvedMimeType || 
+        resolvedMimeType === "application/octet-stream" || 
+        extension === ".mpeg" || 
+        extension === ".mpg" || 
+        extension === ".mp3"
+      ) {
+        if (extension === ".mpeg" || extension === ".mpg") {
+          resolvedMimeType = "audio/mpeg";
+        } else if (extension === ".mp3") {
+          resolvedMimeType = "audio/mp3";
+        } else if (extension === ".wav") {
+          resolvedMimeType = "audio/wav";
+        } else if (extension === ".ogg") {
+          resolvedMimeType = "audio/ogg";
+        } else if (extension === ".m4a") {
+          resolvedMimeType = "audio/m4a";
+        } else if (extension === ".mp4") {
+          resolvedMimeType = "video/mp4";
+        } else if (extension === ".webm") {
+          resolvedMimeType = "audio/webm";
+        }
+      }
+      
+      mediaFileRef = await client.files.upload({
+        file: req.file.path,
+        config: {
+          mimeType: resolvedMimeType,
+        }
+      });
+
+      console.log(`Gemini Files API upload completed. File URI: ${mediaFileRef.uri}. Waiting for ACTIVE state...`);
+      
+      let fileStatus = await client.files.get({ name: mediaFileRef.name });
+      let attempts = 0;
+      while (fileStatus.state === "PROCESSING" && attempts < 30) {
+        console.log(`[Attempt ${attempts + 1}/30] File state: ${fileStatus.state}. Waiting 2 seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        fileStatus = await client.files.get({ name: mediaFileRef.name });
+        attempts++;
+      }
+
+      console.log(`Final file state: ${fileStatus.state}`);
+      if (fileStatus.state !== "ACTIVE") {
+        throw new Error(`File processing failed or timed out with final state: ${fileStatus.state}`);
+      }
+
+      contentParts.push({
+        fileData: {
+          fileUri: mediaFileRef.uri,
+          mimeType: mediaFileRef.mimeType || resolvedMimeType,
+        }
+      });
+    } else {
+      // Standardize mimetype for base64 inline body fallback
+      const mediaMimeType = mimeType || "audio/webm";
+      let cleanBase64 = audioData;
+      if (audioData.includes(";base64,")) {
+        cleanBase64 = audioData.split(";base64,")[1];
+      }
+      contentParts.push({
+        inlineData: {
+          data: cleanBase64,
+          mimeType: mediaMimeType,
+        },
+      });
+    }
+
+    // Add the system configuration prompt
+    contentParts.push({ text: promptText });
+
+    // Run structured voice annotation in a single robust execution turn
     const response = await client.models.generateContent({
       model: "gemini-3.5-flash",
       contents: [
         {
-          parts: [
-            mediaFileRef,
-            { text: systemPrompt },
-          ],
+          parts: contentParts,
         },
       ],
       config: {
@@ -115,35 +186,49 @@ export default async function handler(req: any, res: any) {
       },
     });
 
-    let parsedResult: any = {};
-    if (response.text) {
-      parsedResult = JSON.parse(response.text);
+    const resultText = response.text;
+    if (!resultText) {
+      throw new Error("Empty response received from Gemini model.");
     }
 
-    sendJson(res, 200, { ...parsedResult, isDemo: false, success: true });
+    // Send cleanly parsed results back to client
+    const resultObj = JSON.parse(resultText);
+    return res.status(200).json({
+      ...resultObj,
+      isDemo: false,
+      success: true,
+    });
 
-    if (mediaFileRef?.name) {
-      try {
-        await client.files.delete({ name: mediaFileRef.name });
-      } catch {
-        // ignore cleanup failure
-      }
-    }
   } catch (error: any) {
-    console.error("/api/transcribe error:", error);
-    sendJson(res, 500, {
+    console.error("Transcription operation failure:", error);
+    return res.status(500).json({
       success: false,
-      error: error.message || "Internal server error.",
-      details: "Ensure the audio file is valid and the Gemini API key is configured.",
+      error: error.message || "An error occurred during audio file processing.",
+      details: "Ensure the audio codec is standard (WebM/WAV/MP3/OGG) and the file is not corrupted."
     });
   } finally {
-    // Clean up uploaded temp files if any
-    try {
-      if (typeof tempFilePath === "string" && fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
+    // 1. Always purge local temporary disk files from the OS storage pool immediately
+    if (req.file && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (e) {
+        console.error("Failed to clear local uploaded temp storage file:", e);
       }
-    } catch {
-      // ignore cleanup failure
+    }
+
+    // 2. Always delete remote file references from Google Gemini storage after generation completes
+    if (mediaFileRef && useFilesApi && client) {
+      try {
+        await client.files.delete({ name: mediaFileRef.name });
+        console.log(`Pruned remote file ${mediaFileRef.name} from Gemini infrastructure.`);
+      } catch (e) {
+        console.error("Failed to delete remote file from Gemini infrastructure:", e);
+      }
     }
   }
-}
+};
+
+app.post("/api/transcribe", upload.single("audioFile"), handleTranscribe);
+app.post("*", upload.single("audioFile"), handleTranscribe);
+
+export default app;
