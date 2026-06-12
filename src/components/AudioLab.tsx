@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   Upload, Sparkles, Globe, FileText, 
-  AlertTriangle, Trash2, CheckCircle, Info, RefreshCw, Settings, ChevronDown, ChevronUp
+  AlertTriangle, Trash2, CheckCircle, Info, RefreshCw, Settings, ChevronDown, ChevronUp,
+  Copy, Check
 } from "lucide-react";
 import { TranscriptionResult } from "../types";
 
@@ -155,6 +156,29 @@ export default function AudioLab() {
   const [loadingStep, setLoadingStep] = useState<string>("Initializing...");
   const [errorText, setErrorText] = useState<string | null>(null);
   const [result, setResult] = useState<TranscriptionResult | null>(null);
+
+  // Copy to clipboard notification states
+  const [copiedTranscript, setCopiedTranscript] = useState<boolean>(false);
+  const [copiedTranslation, setCopiedTranslation] = useState<boolean>(false);
+  const [copiedRomanUrdu, setCopiedRomanUrdu] = useState<boolean>(false);
+
+  const copyToClipboard = async (text: string, type: "transcript" | "translation" | "romanUrdu") => {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (type === "transcript") {
+        setCopiedTranscript(true);
+        setTimeout(() => setCopiedTranscript(false), 2000);
+      } else if (type === "translation") {
+        setCopiedTranslation(true);
+        setTimeout(() => setCopiedTranslation(false), 2000);
+      } else if (type === "romanUrdu") {
+        setCopiedRomanUrdu(true);
+        setTimeout(() => setCopiedRomanUrdu(false), 2000);
+      }
+    } catch (err) {
+      console.error("Failed to copy text: ", err);
+    }
+  };
 
   // Drag-and-drop / select handlers (Safely store file binary directly)
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -318,11 +342,55 @@ export default function AudioLab() {
         );
       }
 
+      // Robustly extract only the first complete JSON object to handle potential trailing tokens or text
+      const extractFirstJSON = (text: string): string => {
+        const firstBrace = text.indexOf("{");
+        if (firstBrace === -1) return text;
+        
+        let braceCount = 0;
+        let inString = false;
+        let escaping = false;
+        
+        for (let i = firstBrace; i < text.length; i++) {
+          const char = text[i];
+          if (escaping) {
+            escaping = false;
+            continue;
+          }
+          if (char === "\\") {
+            escaping = true;
+            continue;
+          }
+          if (char === '"') {
+            inString = !inString;
+            continue;
+          }
+          if (!inString) {
+            if (char === "{") {
+              braceCount++;
+            } else if (char === "}") {
+              braceCount--;
+              if (braceCount === 0) {
+                return text.substring(firstBrace, i + 1);
+              }
+            }
+          }
+        }
+        
+        // Fallback to substring matching if braces are unbalanced
+        const lastBrace = text.lastIndexOf("}");
+        if (lastBrace > firstBrace) {
+          return text.substring(firstBrace, lastBrace + 1);
+        }
+        return text;
+      };
+
       let parsedResult: any;
       try {
-        parsedResult = JSON.parse(responseText);
-      } catch (e) {
-        throw new Error(`Server Response Error: ${responseText.slice(0, 200)}...`);
+        const cleanResponseText = extractFirstJSON(responseText.trim());
+        parsedResult = JSON.parse(cleanResponseText);
+      } catch (e: any) {
+        throw new Error(`Server Response Error: ${e.message || "Invalid response representation"}. Core: ${responseText.slice(0, 200)}...`);
       }
 
       if (!response.ok) {
@@ -570,7 +638,25 @@ export default function AudioLab() {
 
                 {/* Plain Transcription block */}
                 <div>
-                  <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Full Transcription</h5>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Full Transcription</h5>
+                    <button
+                      onClick={() => copyToClipboard(result.transcript, "transcript")}
+                      className="text-[10px] font-semibold text-slate-500 hover:text-emerald-600 transition-all flex items-center gap-1 cursor-pointer bg-white px-2 py-1 rounded border border-slate-200/80 shadow-3xs"
+                    >
+                      {copiedTranscript ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-600 animate-scale-up" />
+                          <span className="text-emerald-700 font-bold">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3 text-slate-400" />
+                          <span>Copy text</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                   <div className="text-xs text-slate-800 leading-relaxed bg-white p-4 rounded-xl border border-slate-200 font-medium whitespace-pre-wrap">
                     {result.transcript}
                   </div>
@@ -579,7 +665,25 @@ export default function AudioLab() {
                 {/* Multilingual Translation overlay */}
                 {result.translation && (
                   <div>
-                    <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Translation</h5>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Translation</h5>
+                      <button
+                        onClick={() => copyToClipboard(result.translation, "translation")}
+                        className="text-[10px] font-semibold text-slate-500 hover:text-emerald-600 transition-all flex items-center gap-1 cursor-pointer bg-white px-2 py-1 rounded border border-slate-200/80 shadow-3xs"
+                      >
+                        {copiedTranslation ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600 animate-scale-up" />
+                            <span className="text-emerald-700 font-bold">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3 text-slate-400" />
+                            <span>Copy translation</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                     <div className="text-xs text-slate-700 leading-relaxed bg-white p-4 rounded-xl border border-slate-200 italic">
                       "{result.translation}"
                     </div>
@@ -589,9 +693,27 @@ export default function AudioLab() {
                 {/* Phonetic transliteration box */}
                 {result.romanUrduTranslation && (
                   <div>
-                    <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest mb-1.5 flex items-center gap-1">
-                      <Sparkles className="w-3.5 h-3.5 text-emerald-600" /> Romanized / Message-Style Translation
-                    </h5>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-600" /> Romanized / Message-Style Translation
+                      </h5>
+                      <button
+                        onClick={() => copyToClipboard(result.romanUrduTranslation, "romanUrdu")}
+                        className="text-[10px] font-semibold text-slate-500 hover:text-emerald-600 transition-all flex items-center gap-1 cursor-pointer bg-white px-2 py-1 rounded border border-slate-200/80 shadow-3xs"
+                      >
+                        {copiedRomanUrdu ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600 animate-scale-up" />
+                            <span className="text-emerald-700 font-bold">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3 text-slate-400" />
+                            <span>Copy romanized</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                     <div className="text-xs text-emerald-950 leading-relaxed bg-emerald-50/20 p-4 rounded-xl border border-emerald-100 italic font-medium">
                       "{result.romanUrduTranslation}"
                     </div>
