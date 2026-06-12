@@ -70,8 +70,8 @@ export default function AudioLab() {
         return;
       }
 
-      // Setup clean streaming steps based on sizing
-      const isHeavy = droppedFile.size > 4.2 * 1024 * 1024;
+      // Setup clean streaming steps based on sizing (lowered threshold to 3MB to prevent base64 encoding from exceeding Vercel's 4.5MB limit)
+      const isHeavy = droppedFile.size > 3.0 * 1024 * 1024;
       setLoadingStep(isHeavy ? "Uploading large file payload..." : "Initiating voice compilation...");
 
       // Progressive placeholder steps for 5-hour files
@@ -139,6 +139,21 @@ export default function AudioLab() {
       clearInterval(stepInterval);
 
       const responseText = await response.text();
+
+      // Intercept 413 Payload Too Large or Vercel serverless request body bounds before parsing JSON
+      if (
+        response.status === 413 || 
+        responseText.includes("Too Large") || 
+        responseText.includes("Entity Too Large") || 
+        responseText.includes("Request Entity") ||
+        responseText.includes("Payload Too Large")
+      ) {
+        throw new Error(
+          "Cloud limit exceeded (Vercel strictly restricts server requests to 4.5 MB). " +
+          "Please compress this audio file (e.g. record as a compressed low-bitrate Mono MP3/M4A) or upload a shorter clip below 4.4 MB."
+        );
+      }
+
       let parsedResult: any;
       try {
         parsedResult = JSON.parse(responseText);
@@ -299,11 +314,11 @@ export default function AudioLab() {
             )}
           </div>
 
-          {droppedFile && droppedFile.size > 4.2 * 1024 * 1024 && (
+          {droppedFile && droppedFile.size > 3.0 * 1024 * 1024 && (
             <div className="bg-amber-50/70 p-3 rounded-xl border border-amber-200/60 text-[11px] text-amber-800 leading-relaxed flex items-start gap-2 shadow-2xs">
               <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
               <div>
-                <span className="font-bold">Platform Payload Alert:</span> This file is {humanReadableSize(droppedFile.size)}. Some cloud setups (like your Vercel deployment) enforce a strict 4.5 MB body limit. For long files (up to 1 hour), simply compress/recommend your client to record files as a compressed low-bitrate MP3/MPEG (e.g. 8kbps to 16kbps mono) which easily fits 1 full hour of voice notes into less than 3.5 MB!
+                <span className="font-bold">Platform Payload Alert:</span> This file is {humanReadableSize(droppedFile.size)}. Some cloud environments (like your Vercel deployment) enforce a strict 4.5 MB HTTP request limit. We will stream this directly using Multipart binary stream to stay under bounds, but for very heavy files, kindly compress or record as low-bitrate Mono MP3/M4A to effortlessly process even 1 hour of audio within 3.5 MB!
               </div>
             </div>
           )}
