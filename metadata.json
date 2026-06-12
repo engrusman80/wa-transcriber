@@ -1,8 +1,9 @@
 {
   "name": "Voice Lab",
-  "description": "Transcribe and translate extremely long voice notes, conversations, and audio recordings effortlessly using Gemini AI.",
+  "description": "Transcribe and translate audio recordings using free, open-source OpenAI Whisper. 100% offline capable - no API keys required.",
   "requestFramePermissions": [
     "microphone"
   ],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": ["OPEN_SOURCE_WHISPER_TRANSCRIPTION"]
 }
+

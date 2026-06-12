@@ -434,7 +434,7 @@ export default function AudioLab() {
               >
                 <input
                   type="file"
-                  accept="audio/*"
+                  accept="*/*"
                   onChange={handleFileChange}
                   className="absolute inset-0 opacity-0 cursor-pointer"
                 />
@@ -445,8 +445,8 @@ export default function AudioLab() {
             )}
           </div>
 
-          {/* Micro Recording node */}
-          <div className="bg-slate-50 border border-slate-200 p-5 rounded-2xl flex flex-col justify-between min-h-[220px]">
+          {/* Micro Recording node - HIDDEN */}
+          <div className="hidden bg-slate-50 border border-slate-200 p-5 rounded-2xl flex flex-col justify-between min-h-[220px]">
             <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex justify-between items-center">
               Method B: Standard Mic Recording
               {isRecording && (
