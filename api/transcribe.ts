@@ -27,6 +27,48 @@ function getGeminiClient(): GoogleGenAI {
   });
 }
 
+// Durable exponential backoff retry utility to insulate the client from temporary 503 Service Unavailable, 429 Rate Limits, or load spikes.
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = 4,
+  initialDelayMs = 2000,
+  maxDelayMs = 12000
+): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      attempt++;
+      const errorMessage = error?.message || String(error);
+      const statusCode = error?.status || error?.code || error?.statusCode || 500;
+      
+      const isTransient = 
+        statusCode === 429 || 
+        statusCode === 503 || 
+        statusCode === 504 || 
+        statusCode === 502 ||
+        errorMessage.includes("503") || 
+        errorMessage.includes("429") ||
+        errorMessage.includes("temporarily unavailable") ||
+        errorMessage.includes("resource exhausted") ||
+        errorMessage.includes("rate limit") ||
+        errorMessage.includes("UNAVAILABLE") ||
+        errorMessage.includes("overloaded") ||
+        errorMessage.includes("experiencing");
+
+      if (attempt >= retries || !isTransient) {
+        console.error(`Gemini operation final retry attempt failed or error is not retryable: ${errorMessage}`);
+        throw error;
+      }
+      
+      const delay = Math.min(initialDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+      console.warn(`[Retry ${attempt}/${retries}] Gemini transient warning (Code: ${statusCode}). Retrying in ${delay}ms... Error: ${errorMessage}`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 const handleTranscribe = async (req: express.Request, res: express.Response) => {
   // Disable HTTP request & response timeouts to accommodate 5-hour long voice files
   req.setTimeout(0);
@@ -147,21 +189,21 @@ const handleTranscribe = async (req: express.Request, res: express.Response) => 
         }
       }
       
-      mediaFileRef = await client.files.upload({
-        file: req.file.path,
+      mediaFileRef = await retryWithBackoff(() => client!.files.upload({
+        file: req!.file!.path,
         config: {
           mimeType: resolvedMimeType,
         }
-      });
+      }));
 
       console.log(`Gemini Files API upload completed. File URI: ${mediaFileRef.uri}. Waiting for ACTIVE state...`);
       
-      let fileStatus = await client.files.get({ name: mediaFileRef.name });
+      let fileStatus = await retryWithBackoff(() => client!.files.get({ name: mediaFileRef.name }));
       let attempts = 0;
       while (fileStatus.state === "PROCESSING" && attempts < 30) {
         console.log(`[Attempt ${attempts + 1}/30] File state: ${fileStatus.state}. Waiting 2 seconds...`);
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        fileStatus = await client.files.get({ name: mediaFileRef.name });
+        fileStatus = await retryWithBackoff(() => client!.files.get({ name: mediaFileRef.name }));
         attempts++;
       }
 
@@ -194,8 +236,8 @@ const handleTranscribe = async (req: express.Request, res: express.Response) => 
     // Add the system configuration prompt
     contentParts.push({ text: promptText });
 
-    // Run structured voice annotation in a single robust execution turn
-    const response = await client.models.generateContent({
+    // Run structured voice annotation in a single robust execution turn with exponential backoff protection
+    const response = await retryWithBackoff(() => client!.models.generateContent({
       model: "gemini-3.5-flash",
       contents: [
         {
@@ -205,7 +247,7 @@ const handleTranscribe = async (req: express.Request, res: express.Response) => 
       config: {
         responseMimeType: "application/json",
       },
-    });
+    }));
 
     const resultText = response.text;
     if (!resultText) {
